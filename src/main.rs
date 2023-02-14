@@ -1,13 +1,16 @@
 use std::env;
 use ExprU::*;
 use Token::*;
+use ParseErr::*;
+use RuntimeErr::*;
+use std::fmt;
 
 fn main() {
+    // bare-bones CLI
     let output = match &env::args().collect::<Vec<String>>()[..] {
         [_, input] => match run(input.clone()) {
-            Ok(FloatU(x)) => format!("{}", x),
-            Ok(_) => format!("runtime error"),
-            Err(e) => format!("{}", e),
+            Ok(value) => value.to_string(),
+            Err(e) => e.to_string(),
         },
         _ => "error - expected exactly one argument.".to_owned(),
     };
@@ -32,6 +35,89 @@ enum ExprU {
     FloatU(f32),
 }
 
+impl fmt::Display for ExprU {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            FloatU(x) =>
+                x.to_string(),
+
+            OperatorU { name, left, right }  =>
+                format!("{} {} {}", left, name, right),
+        };
+
+        write!(f, "{}", s)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ParseErr {
+    OperatorMissingValuesErr { name: String },
+    UnexpectedTokenErr(Token),
+    MismatchedParenthesesErr,
+    UnrecognizedParenErr(char),
+    AstNotUnifiedErr
+}
+
+impl fmt::Display for ParseErr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg = match self {
+            OperatorMissingValuesErr { name } => 
+                format!("missing values for operator {}", name),
+
+            UnexpectedTokenErr(tok) =>
+                format!("unexpected token: {}", token_name(tok)),
+            
+            MismatchedParenthesesErr =>
+                "mismatched parentheses".to_owned(),
+
+            UnrecognizedParenErr(symbol) =>
+                format!("unrecognized paren: {}", symbol),
+
+            AstNotUnifiedErr =>
+                "ast not unified".to_owned()
+        };
+
+        write!(f, "{}", msg)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum RuntimeErr {
+    DivideByZeroErr,
+    InvalidOperatorErr { name: String }
+}
+
+impl fmt::Display for RuntimeErr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg = match self {
+            DivideByZeroErr =>
+                "divide by zero error".to_owned(),
+            
+            InvalidOperatorErr { name } =>
+                format!("encountered invalid operator {}", name)
+        };
+
+        write!(f, "{}", msg)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Err {
+    ParseErr(ParseErr),
+    RuntimeErr(RuntimeErr)
+}
+
+impl fmt::Display for Err {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg = match self {
+            Err::ParseErr(e) => e.to_string(),
+            Err::RuntimeErr(e) => e.to_string(),
+        };
+
+        write!(f, "{}", msg)
+    }
+}
+
 fn mk_operatoru(name: String, left: ExprU, right: ExprU) -> ExprU {
     OperatorU {
         name: name,
@@ -40,7 +126,7 @@ fn mk_operatoru(name: String, left: ExprU, right: ExprU) -> ExprU {
     }
 }
 
-fn tokenize(input: String) -> Result<Vec<Token>, String> {
+fn tokenize(input: String) -> Vec<Token> {
     let strs = input.split_whitespace();
     let mut tokens = vec![];
 
@@ -55,7 +141,7 @@ fn tokenize(input: String) -> Result<Vec<Token>, String> {
         tokens.push(tok);
     }
 
-    Ok(tokens)
+    tokens
 }
 
 fn precedence(op: &Token) -> u32 {
@@ -66,28 +152,28 @@ fn precedence(op: &Token) -> u32 {
     }
 }
 
-fn token_name(tok: Token) -> String {
+fn token_name(tok: &Token) -> String {
     match tok {
-        OpTok(name) => name,
+        OpTok(name) => name.clone(),
         FloatTok(x) => x.to_string(),
         ParenTok(symbol) => symbol.to_string(),
     }
 }
 
-fn parse_operator(e: Token, l: Option<ExprU>, r: Option<ExprU>) -> Result<ExprU, String> {
+fn parse_operator(e: Token, l: Option<ExprU>, r: Option<ExprU>) -> Result<ExprU, ParseErr> {
     match (e, l, r) {
         // if there are two values, merge them into the ast
         (OpTok(name), Some(x), Some(y)) => Ok(mk_operatoru(name, y, x)),
 
         // if there are less than two values on the stack, there's an error
-        (OpTok(name), _, _) => Err(format!("missing values for operator {}", name)),
+        (OpTok(name), _, _) => Err(OperatorMissingValuesErr { name: name.to_owned()}),
 
-        (tok, _, _) => Err(format!("unexpected token: {}", token_name(tok))),
+        (tok, _, _) => Err(UnexpectedTokenErr(tok)),
     }
 }
 
 // uses shunting yard to build the AST from a Vec of tokens
-fn parse(tokens: Vec<Token>) -> Result<ExprU, String> {
+fn parse(tokens: Vec<Token>) -> Result<ExprU, ParseErr> {
     let mut values = vec![];
     let mut operators = vec![];
 
@@ -103,7 +189,7 @@ fn parse(tokens: Vec<Token>) -> Result<ExprU, String> {
             ParenTok(symbol) if symbol == ')' => loop {
                 match operators.pop() {
                     // if there's nothing to pop, there are mismatched parens
-                    None => return Err("mismatched parentheses".to_owned()),
+                    None => return Err(MismatchedParenthesesErr),
                     Some(op) => {
                         // stop when we see a left paren
                         if op == ParenTok('(') {
@@ -140,7 +226,7 @@ fn parse(tokens: Vec<Token>) -> Result<ExprU, String> {
                 }
             },
 
-            ParenTok(symbol) => return Err(format!("unrecognized paren syntax: {}", symbol)),
+            ParenTok(symbol) => return Err(UnrecognizedParenErr(symbol)),
         }
     }
 
@@ -148,7 +234,7 @@ fn parse(tokens: Vec<Token>) -> Result<ExprU, String> {
         match operators.pop() {
             None => match &values[..] {
                 [ast] => return Ok(ast.clone()),
-                _ => return Err("ast not unified".to_owned()),
+                _ => return Err(AstNotUnifiedErr),
             },
             Some(op) => {
                 let ast = parse_operator(op, values.pop(), values.pop())?;
@@ -158,7 +244,7 @@ fn parse(tokens: Vec<Token>) -> Result<ExprU, String> {
     }
 }
 
-fn eval(expr: ExprU) -> Result<ExprU, String> {
+fn eval(expr: ExprU) -> Result<ExprU, RuntimeErr> {
     match expr {
         FloatU(x) => Ok(FloatU(x)),
 
@@ -169,12 +255,12 @@ fn eval(expr: ExprU) -> Result<ExprU, String> {
                 "-" => Ok(FloatU(x - y)),
                 "/" => {
                     if y == 0.0 {
-                        Err("divide by zero error".to_owned())
+                        Err(DivideByZeroErr)
                     } else {
                         Ok(FloatU(x / y))
                     }
                 }
-                op => Err(format!("encountered invalid operator {}", op)),
+                op => Err(InvalidOperatorErr { name: op.to_owned() }),
             },
 
             (xu, yu) => eval(mk_operatoru(name, eval(xu)?, eval(yu)?)),
@@ -182,15 +268,16 @@ fn eval(expr: ExprU) -> Result<ExprU, String> {
     }
 }
 
-fn run(input: String) -> Result<ExprU, String> {
-    tokenize(input).and_then(parse).and_then(eval)
+fn run(input: String) -> Result<ExprU, Err> {
+    parse(tokenize(input)).map_err(Err::ParseErr)
+        .and_then(|parsed| eval(parsed).map_err(Err::RuntimeErr))
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
 
-    fn run(input: &str) -> Result<ExprU, String> {
+    fn run(input: &str) -> Result<ExprU, Err> {
         super::run(input.to_owned())
     }
 
@@ -206,13 +293,17 @@ mod test {
         assert_eq!(run("( 1 + 2 ) * 3"), Ok(FloatU(9.0)));
         assert_eq!(run("1 + 2 + 3"), Ok(FloatU(6.0)));
         assert_eq!(run("1 * 2 + 1"), Ok(FloatU(3.0)));
+        assert_eq!(run("1 +"), Err(Err::ParseErr(OperatorMissingValuesErr { name: "+".to_owned() })));
+        assert_eq!(run("( 1 ) )"), Err(Err::ParseErr(MismatchedParenthesesErr)));
+        assert_eq!(run("1 $ 2"), Err(Err::RuntimeErr(InvalidOperatorErr { name: "$".to_owned() })));
+        assert_eq!(run("1 / 0"), Err(Err::RuntimeErr(DivideByZeroErr)));
     }
 
     #[test]
     fn tokenize_tests() {
         assert_eq!(
             tokenize("1 + 2".to_owned()),
-            Ok(vec![FloatTok(1.0), OpTok("+".to_owned()), FloatTok(2.0)])
+            vec![FloatTok(1.0), OpTok("+".to_owned()), FloatTok(2.0)]
         );
     }
 
