@@ -22,7 +22,7 @@ fn main() {
 enum Token {
     ParenTok(char),
     OpTok(String),
-    FloatTok(f32),
+    IntTok(f32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -118,6 +118,7 @@ impl fmt::Display for Err {
     }
 }
 
+// sugar so I don't have to call `Box::new` every time
 fn mk_operatoru(name: String, left: ExprU, right: ExprU) -> ExprU {
     OperatorU {
         name: name,
@@ -126,19 +127,118 @@ fn mk_operatoru(name: String, left: ExprU, right: ExprU) -> ExprU {
     }
 }
 
+// convert a string to tokens using a strategy similar to parser combinators
 fn tokenize(input: String) -> Vec<Token> {
-    let strs = input.split_whitespace();
+    fn whitespace(s: &Vec<char>) -> Vec<char> {
+        let rest: Vec<char> = s.into_iter().skip_while(|c| c.is_whitespace()).map(|c| c.clone()).collect();
+        rest
+    }
+
+    fn paren(s: &Vec<char>) -> Option<(Token, Vec<char>)> {
+        // consume any whitespace before a paren
+        let ss = whitespace(s);
+        // check if the character is a paren
+        if let Some((&c, rest)) = ss.split_first() {
+            if c == ')' {
+                Some((ParenTok(')'), rest.to_vec()))
+            } else if c == '(' {
+                Some((ParenTok('('), rest.to_vec()))
+            } else {
+                // if it's not, don't progress the parser
+                None
+            }
+        } else {
+            // the input is exhausted
+            None
+        }
+    }
+
+    fn pos_int(s: &Vec<char>) -> Option<(Token, Vec<char>)> {
+        // don't consume any whitespace before a positive int. (this parser is used for negative numbers as well)
+
+        // check if the character is a digit
+        if let Some((&c, _)) = s.split_first() {
+            if c.is_digit(10) {
+                let i: String = s.into_iter().take_while(|c| c.is_digit(10)).collect();
+                let rest2: Vec<char> = s.into_iter().skip_while(|c| c.is_digit(10)).collect::<String>().chars().collect();
+                // TODO err if the number is too big
+                i.parse::<f32>().ok().map(|ii| (IntTok(ii), rest2))
+            } else {
+                // if it's not, don't progress the parser
+                None
+            }
+        } else {
+            // the input is exhausted
+            None
+        }
+    }
+
+    fn int(s: &Vec<char>) -> Option<(Token, Vec<char>)> {
+        // consume any whitespace before an int
+        let ss = whitespace(s);
+        // check if the character is negation
+        if let Some((&c, rest)) = ss.split_first() {
+            if c == '~' {
+                match pos_int(&rest.to_vec()) {
+                    Some((IntTok(i), r)) => {
+                        Some((IntTok(-1.0 * i), r))
+                    },
+                    x => x 
+                }
+            } else {
+                // if it's not, check if it's a positive int instead
+                pos_int(&ss.to_vec())
+            }
+        } else {
+            // the input is exhausted
+            None
+        }
+    }
+
+    fn operator(s: &Vec<char>) -> Option<(Token, Vec<char>)> {
+        // consume any whitespace before an int
+        let ss = whitespace(s);
+        // parse anything that could be an operator instead of hardcoding known operator syntax here.
+        // we'll save that to be a parsing error rather than a lexing error.
+        // we recognize these symbols, but we'll reject the ones that lack meaning when we check for meaning.
+        let operator_chars = ['!','#','$','%','&','*','+','.','/','<','=','>','?','@','^','|','-','~',':'];
+        // TODO make local fn split_while?
+        let op: String = ss.clone().into_iter().take_while(|c| operator_chars.contains(c)).collect();
+        if op.is_empty() {
+            None
+        } else {
+            let rest: Vec<char> = ss.into_iter().skip_while(|c| operator_chars.contains(c)).collect();
+            Some((OpTok(op), rest))
+        }
+    }
+
+    fn parse_tokens(tokens: &Vec<Token>, rest: &Vec<char>) -> Option<(Vec<Token>, Vec<char>)> {
+        // todo parse lazily
+        let next = [paren(&rest), int(&rest), operator(&rest)].into_iter().find(|x| x.is_some());
+
+        match next {
+            Some(Some((tok, rest2))) => {
+                let mut tokens2 = tokens.clone();
+                tokens2.push(tok);
+                Some((tokens2, rest2))
+            },
+            _ => None,
+        }
+    }
+
+    let mut rest: Vec<char> = input.chars().collect();
     let mut tokens = vec![];
 
-    for s in strs {
-        let tok = match s {
-            "(" => ParenTok('('),
-            ")" => ParenTok(')'),
-            x => x
-                .parse::<f32>()
-                .map_or_else(|_| OpTok(s.to_owned()), |n| FloatTok(n)),
-        };
-        tokens.push(tok);
+    while !rest.is_empty() {
+        match parse_tokens(&tokens, &rest) {
+            Some((tokens2, rest2)) => {
+                tokens = tokens2;
+                rest = rest2;
+            },
+            None => {
+                break; // TODO parse error instead
+            }
+        }
     }
 
     tokens
@@ -155,7 +255,7 @@ fn precedence(op: &Token) -> u32 {
 fn token_name(tok: &Token) -> String {
     match tok {
         OpTok(name) => name.clone(),
-        FloatTok(x) => x.to_string(),
+        IntTok(x) => x.to_string(),
         ParenTok(symbol) => symbol.to_string(),
     }
 }
@@ -180,7 +280,7 @@ fn parse(tokens: Vec<Token>) -> Result<ExprU, ParseErr> {
     for tok in tokens {
         match tok {
             // values move to the value stack
-            FloatTok(x) => values.push(FloatU(x)),
+            IntTok(x) => values.push(FloatU(x)),
 
             // left parens move to the operator stack
             ParenTok(symbol) if symbol == '(' => operators.push(tok),
@@ -290,6 +390,8 @@ mod test {
         assert_eq!(run("1"), Ok(FloatU(1.0)));
         assert_eq!(run("1 + 2"), Ok(FloatU(3.0)));
         assert_eq!(run("1 + 2 * 3"), Ok(FloatU(7.0)));
+        assert_eq!(run("1+2*3"), Ok(FloatU(7.0)));
+        assert_eq!(run("  1 +  2*   3   "), Ok(FloatU(7.0)));
         assert_eq!(run("( 1 + 2 ) * 3"), Ok(FloatU(9.0)));
         assert_eq!(run("1 + 2 + 3"), Ok(FloatU(6.0)));
         assert_eq!(run("1 * 2 + 1"), Ok(FloatU(3.0)));
@@ -302,15 +404,31 @@ mod test {
     #[test]
     fn tokenize_tests() {
         assert_eq!(
+            tokenize("()".to_owned()),
+            vec![ParenTok('('), ParenTok(')')]
+        );
+        assert_eq!(
+            tokenize("~1".to_owned()),
+            vec![IntTok(-1.0), ]
+        );
+        assert_eq!(
+            tokenize("+".to_owned()),
+            vec![OpTok("+".to_owned())]
+        );
+        assert_eq!(
+            tokenize("10+20".to_owned()),
+            vec![IntTok(10.0), OpTok("+".to_owned()), IntTok(20.0)]
+        );
+        assert_eq!(
             tokenize("1 + 2".to_owned()),
-            vec![FloatTok(1.0), OpTok("+".to_owned()), FloatTok(2.0)]
+            vec![IntTok(1.0), OpTok("+".to_owned()), IntTok(2.0)]
         );
     }
 
     #[test]
     fn parse_tests() {
         assert_eq!(
-            parse(vec![FloatTok(1.0), OpTok("+".to_owned()), FloatTok(2.0)]),
+            parse(vec![IntTok(1.0), OpTok("+".to_owned()), IntTok(2.0)]),
             Ok(mk_operatoru("+", FloatU(1.0), FloatU(2.0)))
         );
     }
